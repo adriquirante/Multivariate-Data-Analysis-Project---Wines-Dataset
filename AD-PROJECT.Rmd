@@ -1,0 +1,475 @@
+---
+title: "AD-PROJECT"
+author: "Gabriel Bota, Arnau Pons, Adrian Quirante"
+date: "2024-05-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# AD-PROJECT
+
+```{r}
+library(FactoMineR)
+library(cluster)
+library("dplyr")
+library(MASS)
+library(e1071)
+library("DescTools")
+library(caret)
+library(caTools)
+```
+
+### DATASET (Spanish Wines)
+
+```{r}
+data <- read.csv2("wines_SPA.csv", header = TRUE, sep = ",",dec='.')
+head(data)
+```
+
+This dataset consists of various wines from different wineries across Spain. Each wine is represented by the year of production, the region, and the type of wine. Additionally, each wine has been reviewed and rated on a scale from 1 to 5. For each wine, we also have the average rating and the number of reviews. Since some wines have a low number of reviews (possibly because they are expensive or difficult to obtain), the average rating may be biased.
+
+At first glance, it can be observed on the website where this dataset was obtained (<https://www.kaggle.com/datasets/fedesoriano/spanish-wine-quality-dataset>) that most of the numerical variables do not follow a normal distribution, which is required for applying certain methods. Therefore, some preprocessing will be performed on these variables before applying these methods.
+
+Furthermore, before performing any preprocessing, it is considered beneficial to add a new numerical variable to the dataset, which is the age of the wine (instead of working with the year of production). The new variable "age" will be calculated as 2022 minus the "year" of production, as this dataset was uploaded in 2022.
+
+```{r}
+data[,"age"] <- 2022-as.numeric(data[,"year"])
+data <- data[,-3] #we get rid of the variable year
+```
+
+### Preprocessing
+
+```{r}
+data <- na.omit(data) #before treating numerical variables, missing values are omitted
+numeric_var <- c("age","rating","price","num_reviews","acidity","body")
+for (var in numeric_var) {
+  data[,var] <- as.numeric(data[,var])
+}
+for (var in colnames(data)){
+  if (!(var %in% numeric_var)) {
+    data[,var] <- as.factor(data[,var])
+  }
+}
+unique(data$acidity)
+head(data)
+```
+
+In this dataset, some variables could be interpreted as either numerical or categorical. For instance, rating, acidity, and body could be interpreted as categorical since they have only a few distinct values (for example, acidity has only three different values). However, to apply the first two techniques (PCA and MDS), they will be considered numerical. For subsequent analyses, these variables may be considered categorical.
+
+```{r}
+hist(data$age) #The histogram shows a high concentration of probability at low values.
+#Applying a logarithmic transformation would make the age distribution more Gaussian.
+hist(log(data$age)) #This histogram corroborates the hypothesis 
+data$age <- log(data$age)
+```
+
+```{r}
+hist(data$price)#once again logarithm should be applied to the data
+data$price <- log(data$price)
+hist(data$price)#better results could be obtained if outliers were treated
+q1 <- quantile(data$price,0.25)
+q3 <- quantile(data$price,0.75)
+iqr <- q3-q1
+lim_inf <- q1 - 1.5*iqr
+lim_sup <- q3 + 1.5*iqr
+data <- data[-which(data$price < lim_inf | data$price > lim_sup),]
+hist(data$price) #not yet gaussian but much better
+```
+
+```{r}
+hist(data$num_reviews)
+hist(log(data$num_reviews)) #better histogram but not really good
+data$num_reviews <- log(data$num_reviews)
+```
+
+The other numerical variables (acidity, rating and body) can not be treated as the others because they have few distinct values (that is why in some cases it is better to consider them to be categorical).
+
+### PCA
+
+The first method to be applied on the data is going to be PCA:
+
+```{r}
+categorical_vars <- c("winery", "wine", "region", "type", "country")
+
+pca_data <- PCA(data, quali.sup = categorical_vars)
+
+pca_data$eig
+```
+
+If we stick to the 67% of variance explained, we get that we should extract the first three components. Therefore, we will end up working with half of the original dimensions and with a 71.74% of the total variance explained. If we based the decision on extracting those dimensions whose eigenvalue is greater than one, we would get the same result, so it seems pretty valid to take just the first three components.
+
+In order to analyze the loadings/correlations, we need to take into consideration the direction of the vectors (variables projected in the same axis are highly correlated - positively or negatively depending on the direction) and the length of the vectors (longer vectors mean higher correlation).
+
+```{r}
+plot(pca_data,choix='var', axes = c(1,2))
+```
+
+On the one hand, we see that the first dimension is highly correlated with price, rating, and age. Acidity is also correlated, although to a lesser extent and negatively. For the second component, we see that body is highly positively correlated, whilst num_reviews also seems to have a strong positive correlation.
+
+```{r}
+plot(pca_data,choix='var', axes = c(1,3))
+```
+
+The third dimension confirms the fact that acidity wasn't correlated at all with the first component, as it appears to be strongly positively correlated with the third dimension. For the other variables, though, it does not look like there is a clear relation with this dimension.
+
+```{r}
+plot(pca_data,choix='var', axes = c(2,3))
+```
+
+In conclusion, we can affirm that the variables price, rating, and age are positively correlated with the first dimension. Body is highly correlated in a positive way with the second dimension, while num_reviews appears to have a weaker correlation - also positive - with this dimension. The last variable, acidity, is strongly correlated with the third dimension, and it does not look like it has much influence from other dimensions. Age also seems to be slightly negatively related.
+
+```{r}
+pca_data$var$contrib
+```
+
+If we take a look at the contributions from each variable to each dimension, the assumptions we made seem to be correct.
+
+When applying PCA, it can be useful to label the different dimensions, as they will become the new variables to work with.
+
+The first dimension can be named overall wine quality; it is strongly correlated with price, as well as rating, and less with the age. For instance, it is well known that old wines are more appraised by the wine sommeliers, so it makes sense that exquisite and premium wines tend to be expensive. It is important to remark that it looks like, as the number of reviews is slightly negatively related to the first dimension, that as the number of reviews increases, it has a negative impact on the rating. A hypothesis of this phenomenon could be that cheaper wines, thus "worse wines," are more accessible to the public and therefore have a larger number of ratings.
+
+The second dimension has two main correlations; more than half of the dimension is explained by body, so we could name this dimension like that. However, the number of reviews also seems to exert an important negative influence on the dimension.
+
+The third and last dimension is mainly related to acidity, as it contributes to 63.5% of the dimension. Therefore, we will name the dimension acidity.
+
+```{r}
+plot(pca_data, choix = "ind", label='ind', axes = c(1,2))
+```
+
+Although the plot seems to be pretty stacked, we will focus on extreme observations, so we can extract some information. Most of the data seems to be together, as there was a bigger mass of data with lower ratings. We see that there are few observations to grow towards the positive side of the first dimension. Those are the wines that have a top rating and also are expensive. Old wines could also be placed more towards that side, but their contribution was not as high as the price and rating ones. Observations are also distributed uniformly across the second dimension. We can assume then that there are lots of wines that are considered to have different types of bodies, and this can also be explained by the difference in the number of votes of some wines.
+
+For instance, observation number 24 corresponds to Pedro Ximenez's wine Toro Albala Don PX Convento Seleccion from 1931. It is expensive, has a very good rating, is very old, and has few ratings, so it makes sense it's placed where it's placed. Let's take a look at an observation from the other corner of the plot; observation 1030 is a cheap and young cava from Freixenet.
+
+Further observations: The dataset is sorted by rating in descending order. If we take a look at the few numbers we can see in the plot, we'll see that the ones that are further to the right, therefore, by dimension one, more expensive and with a better rating, are those with a lower index. On the other hand, the ones on the left appear to have a higher index.
+
+```{r}
+plot(pca_data, choix = "ind", label='ind', axes = c(1,3))
+```
+
+What we see in this graphic is easy to understand; dimension 3 is mainly related to acidity. However, almost every wine has an acidity of 3 (mean is 2.947), so the big majority of the samples are forming a cloud. The few observations that are further are those that have lower acidity. One example could be Pedro Ximenez's wine Toro Albala Don PX Convento Seleccion, which has an acidity value of 1. Another reason why it is located on the right is because of its price, rating, and age; it is not a cheap wine, it has a good rating (4.8, the second highest possible), and it is almost a hundred years old, so it makes sense it's in the bottom right.
+
+```{r}
+plot(pca_data, choix = "ind", label='ind', axes = c(2,3))
+```
+
+When looking at individuals in dimensions 2 and 3, we see again that those that have low acidity are far from the other observations, as they are a "rare" observation. When it comes to dimension 2, that was mainly explained positively by body and negatively by the number of observations, we can see different observations: Observation number 149, Recaredo Reserva Particular, a cava that has a low body rating and a number of observations lower than the mean (35 to 404), so it's placed in the left corner. In the right corner, we see the 10th observation with 630 reviews, higher than the average, and the highest rating for body.
+
+### MDS
+
+As previously mentioned, for this particular method, it would be beneficial to treat the variable "rating" as categorical to enable a more effective analysis.
+
+```{r}
+numeric_data <- data[, (names(data) %in% numeric_var)]
+numeric_data <- numeric_data[,-1]
+numeric_data_scaled = scale(numeric_data)
+d = dist(numeric_data_scaled, method = "euclidean")
+mds_res = cmdscale(d,k=2)
+set.seed(987654324) #random seed for posterior sampling
+```
+
+The MDS technique is used to analyze similarity data, understanding patterns and relationships within the dataset through a lower-dimensional representation of the data (in this particular case using only two dimensions).
+
+So, let's visualize the relations that can be found in the dataset. For this first analysis, only numerical variables are going to be used to calculate the distance matrix.
+
+```{r}
+colors <- rainbow(length(unique(data$region)))
+plot(mds_res, col = colors[as.numeric(factor(data$region))], 
+     main = "MDS by region")
+```
+
+From a first sight, no distinct clusters based on the wine's region are evident. The plot displays all the colours of the rainbow mixed.
+
+It would be beneficial to have wines clustered by regions, as wines from different regions may possess distinct properties.
+
+Nevertheless, an interpretation of this initial MDS plot can still be made.
+
+```{r}
+colors <- rainbow(length(unique(data$rating)))
+plot(mds_res, col = colors[as.numeric(factor(data$rating))], 
+     main = "MDS by rating")
+idx <- sample(1:nrow(mds_res),size=100)
+mds_res_sampled <- mds_res[idx,]
+labels <- data$rating[idx]
+plot(mds_res_sampled[,1],mds_res_sampled[,2],main = "MDS by rating sampled")
+text(mds_res_sampled[,1],mds_res_sampled[,2],labels)
+```
+
+By assigning each data entry a different color based on its rating, it becomes apparent that they form clusters, although these clusters may overlap. Labeling only a subset of the MDS results enables a clearer interpretation of the plot, as labeling all entries would result in overlapping labels, obscuring any meaningful interpretation. It is observable that wines of lower quality cluster closer together, while they are positioned far from wines of higher quality. In this particular case, negative values of the first dimension are associated with better quality.
+
+```{r}
+par(mfrow=c(1,2))
+colors <- rainbow(length(unique(data$price)))
+plot(mds_res, col = colors[as.numeric(factor(data$price))], 
+     main = "MDS by price")
+idx <- sample(1:nrow(mds_res),size=100)
+mds_res_sampled <- mds_res[idx,]
+labels <- exp(data$price[idx])
+plot(mds_res_sampled[,1],mds_res_sampled[,2],main = "MDS by price sampled")
+text(mds_res_sampled[,1],mds_res_sampled[,2],labels)
+par(mfrow=c(1,2))
+colors <- rainbow(length(unique(data$age)))
+plot(mds_res, col = colors[as.numeric(factor(data$age))], 
+     main = "MDS by age")
+idx <- sample(1:nrow(mds_res),size=100)
+mds_res_sampled <- mds_res[idx,]
+labels <- exp(data$age[idx])
+plot(mds_res_sampled[,1],mds_res_sampled[,2],main = "MDS by age sampled")
+text(mds_res_sampled[,1],mds_res_sampled[,2],labels)
+```
+
+If the data were labeled with either the price or the age, it would likely exhibit a similar pattern. Alongside the first axis, clusters form depending on the overall quality of the wine.
+
+```{r}
+par(mfrow=c(1,2))
+colors <- rainbow(length(unique(data$body)))
+plot(mds_res, col = colors[as.numeric(factor(data$body))], 
+     main = "MDS by body")
+
+idx <- sample(1:nrow(mds_res),size=100)
+mds_res_sampled <- mds_res[idx,]
+labels <- data$body[idx]
+plot(mds_res_sampled[,1],mds_res_sampled[,2],main = "MDS by body sampled")
+text(mds_res_sampled[,1],mds_res_sampled[,2],labels)
+par(mfrow=c(1,2))
+colors <- rainbow(length(unique(data$acidity)))
+plot(mds_res, col = colors[as.numeric(factor(data$acidity))], 
+     main = "MDS by acidity")
+idx <- sample(1:nrow(mds_res),size=100)
+mds_res_sampled <- mds_res[idx,]
+labels <- data$acidity[idx]
+plot(mds_res_sampled[,1],mds_res_sampled[,2],main = "MDS by acidity sampled")
+text(mds_res_sampled[,1],mds_res_sampled[,2],labels)
+
+```
+
+The y-axis represents the clustering of data based on the body of the wine, where higher values on the y-axis correspond to lower values of body.
+
+Furthermore, it is evident that different wines cluster depending on their acidity.
+
+In conclusion, following an initial analysis, the application of the MDS technique on a distance matrix derived from numerical variables reveals that wines with similar properties, and thus similar quality, tend to cluster together.
+
+Let's now calculate the distance matrix using as well a categorical variable: the wine type.
+
+```{r}
+X=numeric_data_scaled
+X = data.frame(X)
+X$type=data$type
+d = daisy(X,metric="gower")
+mds_res_gower <- cmdscale(d,k=2)
+```
+
+```{r}
+colors <- rainbow(length(unique(data$region)))
+plot(mds_res_gower, col = colors[as.numeric(factor(data$region))], 
+     main = "MDS by region")
+plot(mds_res_gower, col = colors[as.numeric(factor(data$region))], 
+     main = "MDS by region")
+text(mds_res_gower[,1],mds_res_gower[,2],data$region)
+
+idx <- sample(1:nrow(mds_res_gower),size=100)
+mds_res_gow_sampled <- mds_res_gower[idx,]
+labels <- data$region[idx]
+plot(mds_res_gow_sampled[,1],mds_res_gow_sampled[,2],main = "MDS by region sampled")
+text(mds_res_gow_sampled[,1],mds_res_gow_sampled[,2],labels)
+```
+
+Five distinct clusters are clearly identifiable. The cluster on the left represents wines from Ribera del Duero, while the cluster on the right corresponds to wines from La Rioja. These two clusters are notably distant from each other in the plot due to the distinct properties exhibited by wines from Ribera del Duero and La Rioja, reflecting differing wine types that are significantly dissimilar. The considerable distance between these clusters can be attributed to variations in climatological conditions, grape varieties, and winemaking traditions.
+
+The two clusters in the middle encompass various regions, making interpretation challenging. These regions likely share similar weather conditions and grape varieties.
+
+Furthermore, a small cluster (light blue) can be observed at the bottom left, corresponding to wines from Montilla Moriles.
+
+In conclusion, after evaluating the proximity of different wines based as well on their type, it is evident that they tend to form clusters based on their regions. Wines from the same region exhibit greater similarity in type.
+
+```{r}
+par(mfrow=c(1,2))
+
+
+colors <- rainbow(length(unique(data$price)))
+plot(mds_res_gower, col = colors[as.numeric(factor(data$price))], 
+     main = "MDS by price")
+
+colors <- rainbow(length(unique(data$rating)))
+plot(mds_res_gower, col = colors[as.numeric(factor(data$rating))], 
+     main = "MDS by rating")
+
+par(mfrow=c(1,2))
+idx <- sample(1:nrow(mds_res_gower),size=100)
+mds_res_gow_sampled <- mds_res_gower[idx,]
+labels <- round(data$price[idx])
+plot(mds_res_gow_sampled[,1],mds_res_gow_sampled[,2],main = "MDS by price sampled")
+text(mds_res_gow_sampled[,1],mds_res_gow_sampled[,2],labels)
+
+idx <- sample(1:nrow(mds_res_gower),size=100)
+mds_res_gow_sampled <- mds_res_gower[idx,]
+labels <- data$rating[idx]
+plot(mds_res_gow_sampled[,1],mds_res_gow_sampled[,2],main = "MDS by rating sampled")
+text(mds_res_gow_sampled[,1],mds_res_gow_sampled[,2],labels)
+```
+
+Finally, it is evident that lower values on the y-axis correspond to wines of better quality, indicated by higher prices and ratings. Therefore, introducing the region in the analysis does not negate the effect on wine quality, as wines of better quality also tend to cluster together.
+
+### CA
+
+In this section we will use Correspondance Analysis to understand relationships between some of our categorical variables. If we try to do so, we encounter some problems because variables have many categories and that difficults interpretation.
+
+```{r}
+contingency_table <- table(data$type, data$region)
+res.ca = CA(contingency_table)
+```
+
+This is an example of our problem. Here we have tried to apply cluster analysis between type and region but we have so many regions that we can't visualize the plot correctly.
+
+However, our most important variable may be 'rating' (numerical) and we would like to analyze relationships between this feature and others as well.
+
+For this reason we have decided to make 'rating' a categorical value by creating some tiers.
+
+```{r}
+breaks_manual <- c(4.2, 4.25, 4.3, 4.4, 4.6, 4.9)
+labels <- c("Tier D", "Tier C", "Tier B", "Tier A", "Tier S")
+data$ratingCat <- cut(data$rating, breaks = breaks_manual, labels = labels, include.lowest = TRUE)
+```
+
+```{r}
+contingency_table <- table(data$ratingCat, data$type)
+contingency_table
+```
+
+```{r}
+res.ca <- CA(contingency_table)
+```
+
+Now we have a more visual and interpretable plot. The first that gets our attention is that Dimension 1 explains 64.3% of the variability and Dimension 2 19.50%, so the first dimension explains three times more than the second.
+
+We can see this in the plot by comparing tiers. In the plot, Tier S has the biggest value in this dimension 1 and Tier D (the blue point without label) has a negative value in this dimension. However, Tiers A, B and C are closer to each other and this is caused by the range of values of the numeric 'rating' feature. Therefore, we think that Dimension 1 is separating the best rated wines from the worst, while the ones in the middle are merged. This is useful as the range of the previous numeric 'rating' feature only took values from 4.2 to 4.9.
+
+Looking at types of wines instead of tiers, we can also see this pattern. Pedro Ximenez has the biggest value in Dimension 1 as it is the most rated type of wine. Sherry and Cava are very well-rated, that is the reason why they are close Pedro Ximenez in this dimension. On the other hand, Rioja White is closer to 0 and far from the ones just mentioned above because his rating is near 4.2, which is a bad rating knowing the range of values. So in terms of columns (types of wines), we are also separating the best rated from the worst.
+
+Dimension 2 is difficult to interpret because it only explains 20% of the variability. From this dimension we can extract some relations between categories. We can see that Sherry and Cava are very close, as they have similar rating, but far from Pedro Ximenez in comparison with Dimension 1. Chardonnay and Sparkling are closer as well because of having a similar rating and price. These two are far from Sherry and Cava because of his different price. Despite of that, we can't find any patterns here, as we find similar values in types that are far in terms of Dimension 2, and different values in types that are closer.
+
+We have the same problem with tiers. We see that Tier S is far from the rest, which is good, but the others are close to each other, leading to a difficult interpretation. Therefore, we consider that Dimension 2 is not giving much importance to rating as it does Dimension 1.
+
+### Cluster Analysis
+
+The first thing we have to do is use numeric data and create a distance matrix.
+
+```{r}
+numeric_data <- data[, (names(data) %in% numeric_var)]
+numeric_data <- numeric_data[,-1]
+numeric_data_scaled = scale(numeric_data)
+d = dist(numeric_data_scaled, method = "euclidean")
+```
+
+Now we'll try clustering observations using different methods to see which gives us clusters more homogeneous and easier to interpret.
+
+```{r}
+fit <- hclust(d, method="single") 
+plot(fit,main="Dendrogram of Single Linkage")
+```
+
+As we see in de dendrogram, we can't ineterpret the plot as there is a large number of observations. For this reason, we'll try to group the categories of a certain feature instead of grouping individuals.
+
+We have already transformed rating to a categorical variable, but clustering tiers does not give us much information as there are few of them. Alternatively, we can cluster types of wines, as there only are 21 and each one represents very well the wines that includes.
+
+```{r}
+numeric_column_names <- names(data)[sapply(data, is.numeric)]
+
+data_selected <- data %>% select(type, all_of(numeric_column_names))
+
+new_data <- data_selected %>%
+  group_by(type) %>%
+  summarise(across(everything(), mean, na.rm = TRUE))
+```
+
+```{r}
+d = dist(new_data, method = "euclidean")
+
+fit <- hclust(d, method="single")
+plot(fit,main="Dendrogram of Single Linkage")
+
+fit1 <- hclust(d, method="complete") 
+plot(fit1,main="Dendrogram of complete Linkage")
+
+fit1 <- hclust(d, method="average") 
+plot(fit1,main="Dendrogram of Average Linkage")
+
+fit3 <- hclust(d, method="ward.D2") 
+plot(fit3,main="Dendrogram of Ward Method")
+
+fit4 <- hclust(d, method="centroid") 
+plot(fit4,main="Dendrogram of Centroid Method")
+```
+
+We think that Ward's method gives us the best interpretable groups. Let's see which groups we obtain from ward's method depending on the number of clusters we use.
+
+```{r}
+plot(fit3,main="Dendrogram of Ward Method")
+groups <- cutree(fit3, k=2 )# c
+rect.hclust(fit3, k=2, border="green")
+
+plot(fit3,main="Dendrogram of Ward Method")
+groups <- cutree(fit3, k=3 )# c
+rect.hclust(fit3, k=3, border="blue")
+```
+
+The main difference between using 2 and 3 clusters is separating types number 9 and number 16 in other group. Our first thought about that is thinking they are outliers, but in this case we won't treat them in that way as we extracted types by averaging numeric features of the wines. For this reason, we don't care having two types of wines in one cluster, we interpret them as two exceptional types of wines and separated from the rest.
+
+If we perform a more in-depth analysis, we see that types 9 and 16 are 'Pedro Ximenez' and 'Sherry', the two most expensive and well-rated types of wines, so we want to keep them in the study for a better interpretation.
+
+However, we'll represent the elbow plot to see which number of clusters is the optimum in this case.
+
+```{r}
+new_new_data <- new_data[, !names(new_data) %in% "type"]
+```
+
+```{r}
+aux<-c()
+for (i in 2:6){
+  k<-kmeans(new_new_data,centers=i,nstart=25)
+  aux[i-1]<-k$tot.withinss
+}
+plot(aux, xlab="Number of Clusters", ylab="TWSS", type="l", main="TWSS vs. number of clusters")
+```
+
+As we see in the elbow plot, there are two "elbows" in 2 and 3 number of clusters. Despite of observing a more drastic change in slope using 2 clusters, we prefer using 3 to separate the two best rated wines from the rest, as we commented previously.
+
+```{r}
+library(cluster)
+library(HSAUR)
+library(kmed)
+
+res <- fastkmed(d, 3)
+silhouette <- sil(d, res$medoid, res$cluster)
+silhouette$result
+silhouette$plot
+```
+
+Using the silhouette criterium, we also see that the optimum would be 2. However, we choose to use 3 because of the reasons mentioned above.
+
+```{r}
+k3 <- kmeans(new_new_data, centers = 3, nstart = 25)
+aggregate(new_new_data ,by=list(k3$cluster),FUN=mean)
+USArrests$cluster<-as.numeric(k3$cluster)
+```
+
+From this table we can see the different characteristics of each particular cluster. It is clear that group 1 has the best-rated types of wines, as his average rating is far from the other groups. However, let's analyze each group precisely.
+
+On the one hand, types in group 1 have the oldest wines, so here we can see a relation between rating or price with age of wines. In terms of body, wines in group 1 are the best as well, but they seem to be less acid than the rest. Another observation is that the most-rated wines have the least number of reviews in average, maybe because they are the most expensive ones. Therefore, from group 1 we interpret positive correlation between rating and price/body/age and we see negative correlation between rating and acidity/number of reviews.
+
+On the other hand, groups 2 and 3 have a more difficult interpretation. In group 2, wines are better rated than in group 3, but cheaper and younger as well. Moreover, group 3 stands out in terms of body whereas group 2 is more acid. For this reason, we think that cluster 2 and 3 are separating types of wines in terms of body and acidity rather than rating, as they are very close in this aspect.
+
+```{r}
+clusplot(new_data, k3$cluster, color=TRUE, shade=TRUE,
+         labels=2, lines=0)
+
+c4<-clara(new_data,3)
+clusplot(new_data, c4$cluster, color=TRUE, shade=TRUE,
+         labels=2, lines=0)
+```
+
+Plotting clusters gives a visual interpretation of all the analysis. The first observation is that clara method doesn't help us on the visualization task because all cluster are overlapped and we want them separated from each other.
+
+Instead, K-means separates the three clusters very well. From plot we can validate our hypothesis that 9 and 16 (from cluster 1) correspond to best and most rare type of wines whereas cluster 2 and 3 have types that are closer to each other, but differ in some characteristics different from the rating.
